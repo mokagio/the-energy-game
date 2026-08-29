@@ -21,8 +21,10 @@
   "use strict";
 
   // ---- Internal (low) resolution. Everything is drawn here, then upscaled. ----
-  const RW = 320;
-  const RH = 180;
+  // ~4x the pixel count of the old 320x180 frame: crisper upscaling AND room for
+  // much finer per-tile texture (flecks, dither, gradients) — a real detail pass.
+  const RW = 640;
+  const RH = 360;
 
   const display = document.getElementById("game");
   display.width = RW;
@@ -31,9 +33,9 @@
   ctx.imageSmoothingEnabled = false;
 
   // ---- Isometric projection constants ----
-  const TW = 16;            // tile width  (full diamond width)
-  const TH = 8;             // tile height (full diamond height) -> 2:1 dimetric
-  const CUBE_H = 7;         // vertical pixels per elevation level (cliff height)
+  const TW = 32;            // tile width  (full diamond width)
+  const TH = 16;            // tile height (full diamond height) -> 2:1 dimetric
+  const CUBE_H = 14;        // vertical pixels per elevation level (cliff height)
 
   // ---- World dimensions ----
   // Grid is deliberately larger than the screen can show, so terrain runs off
@@ -43,12 +45,26 @@
 
   // Ground palette. A tile picks a base "material" then a shade of it. Every
   // face colour derives from the top colour so cliffs read as the same material.
-  // materials: pools of top-face colours (RTS-ish grass/dirt/sand/rock).
+  // materials: pools of top-face colours. Bright, saturated, warm and cheerful —
+  // matching the "Peaceful Plains / Whispering Woods" reference feel: light
+  // saturated grass greens, warm tan dirt/sand paths, cool light stone, and
+  // clean bright water. Nothing dark, muddy, or desaturated.
   const MATERIALS = {
-    grass: ["#3f6f30", "#4a7a3a", "#547f3f", "#456e34", "#5c8a44"],
-    dirt:  ["#7a5a3a", "#6f5233", "#836341"],
-    sand:  ["#b6a061", "#c2ad6e", "#a8934f"],
-    rock:  ["#6d7280", "#5f636f", "#787d8b"],
+    grass: ["#7dc24b", "#8ace55", "#74b845", "#93d55f", "#6aad3f"],
+    dirt:  ["#c9a06a", "#d3ac76", "#bd9560"],   // warm light tan path
+    sand:  ["#e2cf92", "#ecd99f", "#d8c384"],   // pale warm sand
+    rock:  ["#b3bcc6", "#a5aeb9", "#c2cad3"],   // cool light blue-grey stone
+    water: ["#4ec3e8", "#3fb6df", "#5fcef0"],   // clean bright blue
+  };
+
+  // Per-material fleck colours: the tiny scattered detail dots (blades, pebbles,
+  // ripples) drawn on top of each tile face, matching the reference's speckle.
+  const FLECKS = {
+    grass: ["#9fe06a", "#63a43a", "#b6ee80"],
+    dirt:  ["#e0bd85", "#a97f4f"],
+    sand:  ["#f4e6b4", "#c9b070"],
+    rock:  ["#d3dae2", "#8f98a4"],
+    water: ["#8ee0f7", "#2f9fc9"],
   };
 
   // Energy (emissive) tile top colours — these pulse with the energy theme.
@@ -87,12 +103,15 @@
   }
 
   function pickMaterial(x, y, h) {
-    // High ground tends rocky; a separate low-freq field carves dirt/sand patches.
+    // High ground tends rocky; a separate low-freq field carves dirt/sand patches
+    // and a broad low-lying field pools bright water so the map reads varied.
     if (h >= 2) return "rock";
+    const water = valueNoise(x * 0.06 - 80, y * 0.06 - 80);
+    if (h === 0 && water > 0.80) return "water";
     const patch = valueNoise(x * 0.13 + 40, y * 0.13 + 40);
     const patch2 = valueNoise(x * 0.21 - 15, y * 0.21 - 15);
-    if (patch > 0.80) return "rock";
-    if (patch < 0.16) return "sand";
+    if (patch > 0.82) return "rock";
+    if (water > 0.72) return "sand";   // sandy shore ringing the water
     if (patch2 < 0.20) return "dirt";
     return "grass";
   }
@@ -218,7 +237,7 @@
     // little with texture instead of reading as a solid slab.
     if (!emissive) {
       const d = ((cell.x * 7 + cell.y * 13) % 5) - 2; // -2..2
-      top = shadeBy(top, 1 + d * 0.018);
+      top = shadeBy(top, 1 + d * 0.024);
     }
 
     // ---- Cliff side faces (only toward lower neighbours) ----
@@ -235,13 +254,17 @@
     const hRight = neighbourH(cell.rx + 1, cell.ry);
 
     const baseTop = emissive ? t.shade : top; // cliffs use the ground material, not glow
-    const leftCol = shadeBy(baseTop, 0.62);
-    const rightCol = shadeBy(baseTop, 0.46);
+    // Lighter cliff shading than before (bright palette shouldn't read as black
+    // walls), with a subtle top-to-bottom gradient so curved forms show banding.
+    const leftTop = shadeBy(baseTop, 0.80), leftBot = shadeBy(baseTop, 0.62);
+    const rightTop = shadeBy(baseTop, 0.66), rightBot = shadeBy(baseTop, 0.50);
 
-    // Left (SW-facing) face
+    // Left (SW-facing) face — vertical light-to-dark gradient
     if (t.h > hLeft) {
       const drop = (t.h - hLeft) * CUBE_H;
-      ctx.fillStyle = leftCol;
+      const g = ctx.createLinearGradient(0, cy, 0, cy + hh + drop);
+      g.addColorStop(0, leftTop); g.addColorStop(1, leftBot);
+      ctx.fillStyle = g;
       ctx.beginPath();
       ctx.moveTo(cx - hw, cy);
       ctx.lineTo(cx, cy + hh);
@@ -250,10 +273,12 @@
       ctx.closePath();
       ctx.fill();
     }
-    // Right (SE-facing) face
+    // Right (SE-facing) face — vertical light-to-dark gradient
     if (t.h > hRight) {
       const drop = (t.h - hRight) * CUBE_H;
-      ctx.fillStyle = rightCol;
+      const g = ctx.createLinearGradient(0, cy, 0, cy + hh + drop);
+      g.addColorStop(0, rightTop); g.addColorStop(1, rightBot);
+      ctx.fillStyle = g;
       ctx.beginPath();
       ctx.moveTo(cx + hw, cy);
       ctx.lineTo(cx, cy + hh);
@@ -264,7 +289,17 @@
     }
 
     // ---- Top face (diamond) ----
-    ctx.fillStyle = top;
+    // A gentle top-lit gradient across the diamond (bright at the back/top edge,
+    // a touch darker toward the front) gives every face soft shading instead of a
+    // single flat fill.
+    if (emissive) {
+      ctx.fillStyle = top;
+    } else {
+      const g = ctx.createLinearGradient(0, cy - hh, 0, cy + hh);
+      g.addColorStop(0, shadeBy(top, 1.10));
+      g.addColorStop(1, shadeBy(top, 0.90));
+      ctx.fillStyle = g;
+    }
     ctx.beginPath();
     ctx.moveTo(cx, cy - hh);
     ctx.lineTo(cx + hw, cy);
@@ -272,6 +307,32 @@
     ctx.lineTo(cx - hw, cy);
     ctx.closePath();
     ctx.fill();
+
+    // ---- Per-tile fleck texture + decorative details ----
+    // Cheap procedural speckle: a handful of deterministic 1px dots scattered
+    // inside the diamond, in the material's fleck colours — grass blades, pebbles,
+    // ripples. Big fidelity payoff, matching the reference's fine texture.
+    if (!emissive) {
+      const flecks = FLECKS[t.mat] || FLECKS.grass;
+      const n = t.mat === "water" ? 5 : 7;
+      for (let i = 0; i < n; i++) {
+        const r1 = hash2(cell.x * 13 + i * 91 + 3, cell.y * 17 + i * 57 + 5);
+        const r2 = hash2(cell.x * 29 + i * 41 + 7, cell.y * 23 + i * 71 + 9);
+        // uniform point inside the diamond: |u|+|v| <= 1
+        let u = r1 * 2 - 1, v = r2 * 2 - 1;
+        if (Math.abs(u) + Math.abs(v) > 1) { u = Math.sign(u) - u; v = Math.sign(v) - v; }
+        const fx = Math.round(cx + u * hw);
+        const fy = Math.round(cy + v * hh);
+        const col = flecks[Math.floor(hash2(cell.x + i * 3, cell.y + i * 5) * flecks.length)];
+        ctx.fillStyle = col;
+        // slightly larger, brighter tufts occasionally for grass
+        const big = t.mat === "grass" && r1 > 0.86;
+        ctx.fillRect(fx, fy, big ? 2 : 1, 1);
+      }
+      // A soft top highlight streak along the back edges for a rounded read.
+      ctx.fillStyle = shadeBy(top, 1.18);
+      ctx.fillRect(Math.round(cx - hw * 0.35), Math.round(cy - hh * 0.55), Math.max(2, Math.round(hw * 0.5)), 1);
+    }
 
     // faint glow ring around emissive tiles
     if (emissive) {
@@ -308,9 +369,9 @@
     now = ts || 0;
     if (rot !== targetRot) rot = ((targetRot % 4) + 4) % 4;
 
-    // Earth-toned base so the extreme left/right diamond pinch never shows as a
-    // void — any gap reads as darker ground/undergrowth, not sky.
-    ctx.fillStyle = "#2b3d24";
+    // Bright grassy base so the extreme left/right diamond pinch never shows as a
+    // void — any gap reads as more of the same cheerful ground, not a dark border.
+    ctx.fillStyle = "#6aad3f";
     ctx.fillRect(0, 0, RW, RH);
 
     pickList = [];
