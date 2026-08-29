@@ -1,0 +1,57 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: #0b0e1a;
+  overflow: hidden;
+  font-family: "Courier New", monospace;
+}
+
+#stage {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* The canvas is rendered at a tiny internal resolution then upscaled.
+   image-rendering: pixelated is what gives it the crisp blocky SNES look. */
+#game {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  width: min(100vw, 177.7vh);   /* keep 16:9 */
+  height: min(56.25vw, 100vh);
+  display: block;
+  cursor: grab;
+  background: #0b0e1a;
+}
+
+#game:active { cursor: grabbing; }
+
+#hud {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  padding: 8px 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  color: #cfe8ff;
+  text-shadow: 0 1px 0 #000;
+  pointer-events: none;
+  letter-spacing: 1px;
+}
+
+#hud .title {
+  font-weight: bold;
+  color: #ffe14d;
+  font-size: 14px;
+}
+
+#hud .hint {
+  font-size: 11px;
+  color: #7fb2d8;
+}
