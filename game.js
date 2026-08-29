@@ -60,6 +60,20 @@
     water: ["#4ec3e8", "#3fb6df", "#5fcef0"],   // clean bright blue
   };
 
+  // Grass reads as clustered organic patches of a few close greens (like the
+  // reference tileset), NOT a flat fill or scattered speckle. These are the
+  // 4 tones a grass top-face is quantised into — from a darker shadow green up
+  // to a bright highlight green. Structured value-noise (below) picks which tone
+  // each sub-cell lands on, so the clumps are deterministic and repeatable.
+  const GRASS_TONES = ["#5f9e39", "#74b845", "#8ace55", "#a6e070"];
+  // Slightly darker green used to outline the diamond border for a "cut" look.
+  const GRASS_EDGE = "#4e8a2e";
+  // Grass cliff (dirt-under-grass) masonry palette: clod fill, darker mortar
+  // outline between clods, and a green crown line at the very top of the cliff.
+  const GRASS_CLIFF_FILL = ["#9c7b45", "#8a6c3b", "#ac8a52"]; // earthy clod tones
+  const GRASS_CLIFF_MORTAR = "#6d5329"; // darker outline between clods
+  const GRASS_CLIFF_CROWN = "#5f9e39";  // grassy lip along the cliff top edge
+
   // Each unit tile is built out of a SUB x SUB grid of little voxel cells (mini
   // isometric cubes) rather than one big flat diamond. That fine subdivision — not
   // scattered colour flecks — is what carries the detail and reads as dense voxel
@@ -220,6 +234,37 @@
     return shadeBy(baseCol, SUB_SHADES[idx]);
   }
 
+  // ---- Grass: clustered organic patch shading ----------------------------
+  // The grass top face is quantised into GRASS_TONES. To get soft ORGANIC
+  // clumps (not a per-cell speckle, not a flat fill) we sample a smooth
+  // low-frequency value-noise field in continuous tile-local UV space: nearby
+  // sub-cells read almost the same noise value, so they fall into the same tone
+  // band and merge into a patch a few cells wide — exactly the clumped look of
+  // the reference grass. It's fully deterministic (seeded on world tile coords),
+  // so a given tile always textures identically frame to frame.
+  //
+  // gx,gy: world tile coords (the seed/offset into the noise field, so adjacent
+  // tiles' patches flow into each other instead of tiling visibly).
+  // u,v in [0,1): position of this sub-cell's CENTRE within the tile.
+  function grassTone(gx, gy, u, v) {
+    // Two octaves of continuous noise → blobby clusters with a little internal
+    // variation. Frequency ~2.2 across a tile gives clumps a couple cells wide.
+    const fx = gx + u, fy = gy + v;
+    let n = valueNoise(fx * 2.2 + 11.3, fy * 2.2 + 4.7) * 0.68
+          + valueNoise(fx * 5.1 - 3.1, fy * 5.1 + 9.9) * 0.32;
+    // Map noise (roughly 0.2..0.8) across the 4 tones with a light bias toward
+    // the mid greens so highlights/shadows read as occasional accents, not half
+    // the tile.
+    n = (n - 0.2) / 0.6;
+    n = Math.max(0, Math.min(0.999, n));
+    // bias curve: pull toward centre so extreme tones are rarer
+    const biased = n < 0.5
+      ? 0.5 * Math.pow(n * 2, 1.4)
+      : 1 - 0.5 * Math.pow((1 - n) * 2, 1.4);
+    const idx = Math.min(GRASS_TONES.length - 1, Math.floor(biased * GRASS_TONES.length));
+    return GRASS_TONES[idx];
+  }
+
   // Fill one small isometric sub-diamond of a tile's TOP face. The top face is a
   // diamond centred at (cx,cy) with half-width hw / half-height hh. In its (u,v)
   // unit-square space a point maps to
@@ -257,6 +302,67 @@
     ctx.lineTo(px(a0, b1), py(a0, b1));
     ctx.closePath();
     ctx.fill();
+  }
+
+  // Draw a grass cliff (dirt-under-grass) SIDE face as MASONRY: loose offset
+  // rows of outlined dirt-clod shapes, plus a grassy crown along the top edge —
+  // like the reference's stonework side faces, not a flat two-tone fill.
+  // Geometry matches fillSideSub: outer top corner (ox,oy) → inner top corner
+  // (ix,iy) along the top edge, everything dropping straight down by `drop`.
+  // `dark` is the SE/SW shading factor so the two faces stay differently lit.
+  function fillGrassCliff(ox, oy, ix, iy, drop, levels, dark, seedx, seedy) {
+    const ex = ix - ox, ey = iy - oy;         // vector along the top edge
+    const px = (u, v) => ox + ex * u;
+    const py = (u, v) => oy + ey * u + v * drop;
+    const cols = SUB;                           // clods across the face
+    const rowsPerLevel = 3;                     // courses of clods per elevation
+    const rows = rowsPerLevel * levels;
+    const du = 1 / cols, dv = 1 / rows;
+    // grassy crown band: a thin lip of grass green at the very top of the cliff
+    const crownV = Math.min(0.16, 4 / drop);
+    for (let a = 0; a < cols; a++) {
+      ctx.fillStyle = shadeBy(GRASS_CLIFF_CROWN, dark);
+      ctx.beginPath();
+      ctx.moveTo(px(a * du, 0), py(a * du, 0));
+      ctx.lineTo(px((a + 1) * du, 0), py((a + 1) * du, 0));
+      ctx.lineTo(px((a + 1) * du, crownV), py((a + 1) * du, crownV));
+      ctx.lineTo(px(a * du, crownV), py(a * du, crownV));
+      ctx.closePath();
+      ctx.fill();
+    }
+    // clod courses below the crown, each row offset by half a clod
+    for (let r = 0; r < rows; r++) {
+      const v0 = crownV + (1 - crownV) * (r / rows);
+      const v1 = crownV + (1 - crownV) * ((r + 1) / rows);
+      const off = (r % 2) * 0.5 * du;           // brick-style offset rows
+      for (let a = -1; a < cols; a++) {
+        const u0 = a * du + off, u1 = (a + 1) * du + off;
+        const cu0 = Math.max(0, u0), cu1 = Math.min(1, u1);
+        if (cu1 <= cu0) continue;
+        const idx = Math.floor(hash2(seedx + a * 3 + r, seedy + r * 5 - a) * GRASS_CLIFF_FILL.length);
+        const fill = shadeBy(GRASS_CLIFF_FILL[idx], dark);
+        // inset the clod a hair inside its cell so the mortar shows as an outline
+        const inU = (cu1 - cu0) * 0.14, inV = (v1 - v0) * 0.16;
+        const cx0 = cu0 + inU, cx1 = cu1 - inU, cy0 = v0 + inV, cy1 = v1 - inV;
+        // mortar background block (darker) then the clod on top
+        ctx.fillStyle = shadeBy(GRASS_CLIFF_MORTAR, dark);
+        ctx.beginPath();
+        ctx.moveTo(px(cu0, v0), py(cu0, v0));
+        ctx.lineTo(px(cu1, v0), py(cu1, v0));
+        ctx.lineTo(px(cu1, v1), py(cu1, v1));
+        ctx.lineTo(px(cu0, v1), py(cu0, v1));
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = fill;
+        ctx.beginPath();
+        ctx.moveTo(px(cx0, cy0), py(cx0, cy0));
+        ctx.lineTo(px(cx1, cy0), py(cx1, cy0));
+        ctx.lineTo(px(cx1, cy1), py(cx1, cy1));
+        ctx.lineTo(px(cx0, cy1), py(cx0, cy1));
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
   }
 
   // Draw one terrain tile: its top diamond, plus SW/SE cliff faces only where the
@@ -299,28 +405,37 @@
     const leftFlat = shadeBy(baseTop, 0.72);
     const rightFlat = shadeBy(baseTop, 0.56);
 
-    // Left (SW-facing) face — sliced into a SUB-wide grid of little voxel cells,
-    // each a quiet shade of the flat face colour (rows scale with the drop height).
+    const isGrass = t.mat === "grass" && !emissive;
+    // Left (SW-facing) face. Grass gets masonry/clod stonework; other materials
+    // keep the flat voxel-cell subdivision (untouched this pass).
     if (t.h > hLeft) {
       const levels = t.h - hLeft;
       const drop = levels * CUBE_H;
-      const rows = SUB * levels;
-      for (let a = 0; a < SUB; a++)
-        for (let b = 0; b < rows; b++) {
-          const col = subShade(leftFlat, cell.x * 2, cell.y * 2 + 7, a, b);
-          fillSideSub(cx - hw, cy, cx, cy + hh, drop, rows, a, b, col);
-        }
+      if (isGrass) {
+        fillGrassCliff(cx - hw, cy, cx, cy + hh, drop, levels, 0.78, cell.x * 2, cell.y * 2 + 7);
+      } else {
+        const rows = SUB * levels;
+        for (let a = 0; a < SUB; a++)
+          for (let b = 0; b < rows; b++) {
+            const col = subShade(leftFlat, cell.x * 2, cell.y * 2 + 7, a, b);
+            fillSideSub(cx - hw, cy, cx, cy + hh, drop, rows, a, b, col);
+          }
+      }
     }
-    // Right (SE-facing) face — same voxel-cell subdivision.
+    // Right (SE-facing) face — darker lit than the left.
     if (t.h > hRight) {
       const levels = t.h - hRight;
       const drop = levels * CUBE_H;
-      const rows = SUB * levels;
-      for (let a = 0; a < SUB; a++)
-        for (let b = 0; b < rows; b++) {
-          const col = subShade(rightFlat, cell.x * 2 + 5, cell.y * 2, a, b);
-          fillSideSub(cx + hw, cy, cx, cy + hh, drop, rows, a, b, col);
-        }
+      if (isGrass) {
+        fillGrassCliff(cx + hw, cy, cx, cy + hh, drop, levels, 0.6, cell.x * 2 + 5, cell.y * 2);
+      } else {
+        const rows = SUB * levels;
+        for (let a = 0; a < SUB; a++)
+          for (let b = 0; b < rows; b++) {
+            const col = subShade(rightFlat, cell.x * 2 + 5, cell.y * 2, a, b);
+            fillSideSub(cx + hw, cy, cx, cy + hh, drop, rows, a, b, col);
+          }
+      }
     }
 
     // ---- Top face: a 4x4 grid of tiny voxel sub-diamonds ----
@@ -333,6 +448,27 @@
       for (let i = 0; i < SUB; i++)
         for (let j = 0; j < SUB; j++)
           fillTopSub(cx, cy, hw, hh, i, j, top);
+    } else if (t.mat === "grass") {
+      // Grass: clustered organic patch shading. Each sub-cell takes a green tone
+      // from the smooth noise field so adjacent cells merge into clumps, then a
+      // darker edge is stamped along the diamond border for a "cut" definition.
+      const s = 1 / SUB;
+      for (let i = 0; i < SUB; i++)
+        for (let j = 0; j < SUB; j++) {
+          // centre of this sub-cell in tile-local UV
+          const u = (i + 0.5) * s, v = (j + 0.5) * s;
+          let col = grassTone(cell.x, cell.y, u, v);
+          // Darker edge near the diamond outline: cells on the outer ring get
+          // nudged toward the edge green so the tile reads as a cut block.
+          // Only the two lower (front-facing) edges get the darker "cut" line —
+          // like the reference, where the shaded lip sits on the near borders and
+          // the far borders stay bright, so tiles still merge across the field.
+          const onLowerEdge = i === SUB - 1 || j === SUB - 1;
+          const onUpperEdge = i === 0 || j === 0;
+          if (onLowerEdge) col = mix(col, GRASS_EDGE, 0.5);
+          else if (onUpperEdge) col = mix(col, GRASS_EDGE, 0.22);
+          fillTopSub(cx, cy, hw, hh, i, j, col);
+        }
     } else {
       for (let i = 0; i < SUB; i++)
         for (let j = 0; j < SUB; j++)
