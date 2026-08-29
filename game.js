@@ -76,16 +76,29 @@
   // or a gradient. Ordered darkest → lightest.
   const DIRT_TONES  = ["#a5814f", "#bd9560", "#c9a06a", "#d8b47f"]; // patchy clods
   const DIRT_FLECK  = "#6f5330"; // occasional dark pebble / root fleck
+  const DIRT_SPECK  = "#8a6a3e"; // finer secondary specks between clods
+  const DIRT_CRACK  = "#7a5c34"; // thin crack line between clods
   const SAND_TONES  = ["#d8c384", "#e2cf92", "#ecd99f", "#f4e4ad"]; // fine grain
+  const SAND_GRAIN  = "#c7b070"; // darker scattered grain cluster
+  const SAND_SHELL  = "#fff2cf"; // tiny bright shell/pebble speck
   const ROCK_TONES  = ["#9aa4b0", "#a5aeb9", "#b3bcc6", "#c2cad3"]; // flagstone
   const ROCK_SEAM   = "#7c8794"; // dark seam/crack between flagstones
+  const ROCK_CHIP   = "#d8dfe6"; // bright highlight chip on a stone
+  const ROCK_CRACK  = "#6a7482"; // fine hairline crack across a stone
   const WATER_TONES = ["#3fb6df", "#4ec3e8", "#5fcef0", "#7ddbf5"]; // ripple bands
+  const WATER_FOAM  = "#d6f4fc"; // foam cap where a ripple band crests
+  const WATER_SPARK = "#ffffff"; // tiny sparkle highlight on water
+
+  // ---- Grass secondary accents ----
+  const GRASS_BLADE_HI = "#bdec84"; // bright blade/tuft stroke
+  const GRASS_BLADE_LO = "#4f8a2b"; // dark blade/tuft stroke
+  const GRASS_FLOWER   = ["#ffe8a0", "#f7c8e0", "#fff4d0"]; // tiny flower/highlight dots
 
   // Each unit tile is built out of a SUB x SUB grid of little voxel cells (mini
   // isometric cubes) rather than one big flat diamond. That fine subdivision — not
   // scattered colour flecks — is what carries the detail and reads as dense voxel
   // art instead of one flat Minecraft block face.
-  const SUB = 4;            // 4x4 voxel cells per unit tile
+  const SUB = 6;            // 6x6 voxel cells per unit tile — denser fine detail
 
   // Energy (emissive) tile top colours — these pulse with the energy theme.
   const ENERGY = {
@@ -213,8 +226,53 @@
   // texture now — a small ±brightness step, nowhere near the old fleck-dot noise.
   const SUB_SHADES = [0.94, 1.0, 1.07];
   function subShade(baseCol, gx, gy, i, j) {
-    const idx = Math.floor(hash2(gx * 4 + i + 1, gy * 4 + j + 2) * SUB_SHADES.length);
+    const idx = Math.floor(hash2(gx * SUB + i + 1, gy * SUB + j + 2) * SUB_SHADES.length);
     return shadeBy(baseCol, SUB_SHADES[idx]);
+  }
+
+  // ---- Secondary accent pass ----
+  // Each tone function returns a base clustered colour; these companion functions
+  // decide whether a SECOND small accent mark (blade stroke, speck, chip, foam,
+  // sparkle) overlays this sub-cell, deterministically from world coords. Returns
+  // a colour string to overlay, or null to leave the base clustered colour.
+  // Kept at LOW density (sparse high-frequency spikes) so it enriches without
+  // becoming speckly/muddy. All flat fills — no gradients.
+  function accentGrass(fx, fy) {
+    // blade/tuft strokes: sparse bright & dark angled marks
+    const a = hash2(Math.round(fx * SUB) + 211, Math.round(fy * SUB) + 47);
+    if (a > 0.93) return GRASS_BLADE_HI;
+    if (a < 0.055) return GRASS_BLADE_LO;
+    // rare tiny flower dot
+    const f = hash2(Math.round(fx * SUB) + 907, Math.round(fy * SUB) + 613);
+    if (f > 0.985) return GRASS_FLOWER[Math.floor(f * 997) % GRASS_FLOWER.length];
+    return null;
+  }
+  function accentDirt(fx, fy) {
+    const a = hash2(Math.round(fx * SUB) + 331, Math.round(fy * SUB) + 79);
+    if (a > 0.955) return DIRT_SPECK;      // fine secondary speck
+    if (a < 0.04) return DIRT_CRACK;       // thin crack between clods
+    return null;
+  }
+  function accentSand(fx, fy) {
+    const a = hash2(Math.round(fx * SUB) + 523, Math.round(fy * SUB) + 131);
+    if (a > 0.965) return SAND_SHELL;      // tiny bright shell/pebble speck
+    if (a < 0.05) return SAND_GRAIN;       // darker grain cluster
+    return null;
+  }
+  function accentRock(fx, fy) {
+    const a = hash2(Math.round(fx * SUB) + 641, Math.round(fy * SUB) + 173);
+    if (a > 0.96) return ROCK_CHIP;        // bright highlight chip on a stone
+    if (a < 0.045) return ROCK_CRACK;      // hairline crack across a stone
+    return null;
+  }
+  function accentWater(fx, fy) {
+    // foam cap where a ripple band crests, plus rare sparkle
+    const warp = valueNoise(fx * 1.7 + 50.0, fy * 1.7 + 15.0) - 0.5;
+    const band = Math.sin((fx + fy) * 3.4 + warp * 4.0 + now * 0.0016);
+    if (band > 0.93) return WATER_FOAM;    // crest of the wave -> foam
+    const s = hash2(Math.round(fx * SUB) + 777, Math.round(fy * SUB) + 359);
+    if (s > 0.984) return WATER_SPARK;     // tiny sparkle
+    return null;
   }
 
   // ---- Grass: clustered organic patch shading ----------------------------
@@ -391,6 +449,12 @@
           const onUpperEdge = i === 0 || j === 0;
           if (onLowerEdge) col = mix(col, GRASS_EDGE, 0.5);
           else if (onUpperEdge) col = mix(col, GRASS_EDGE, 0.22);
+          // second pass: sparse blade strokes / flower dots (interior only, so
+          // the "cut" border stays clean)
+          if (!onLowerEdge && !onUpperEdge) {
+            const acc = accentGrass(cell.x + u, cell.y + v);
+            if (acc) col = acc;
+          }
           if (hl) col = mix(col, top, 0.6); // fold in the highlight pulse
           fillTopSub(cx, cy, hw, hh, i, j, col);
         }
@@ -405,11 +469,21 @@
                    : t.mat === "rock" ? rockTone
                    : t.mat === "water" ? waterTone
                    : null;
+      const accFn = t.mat === "dirt" ? accentDirt
+                  : t.mat === "sand" ? accentSand
+                  : t.mat === "rock" ? accentRock
+                  : t.mat === "water" ? accentWater
+                  : null;
       for (let i = 0; i < SUB; i++)
         for (let j = 0; j < SUB; j++) {
           const u = (i + 0.5) * s, v = (j + 0.5) * s;
           let col = toneFn ? toneFn(cell.x, cell.y, u, v)
                            : subShade(top, cell.x, cell.y, i, j);
+          // second pass: sparse secondary accent mark overlaid on the base
+          if (accFn) {
+            const acc = accFn(cell.x + u, cell.y + v);
+            if (acc) col = acc;
+          }
           if (hl) col = mix(col, top, 0.6); // fold in the highlight pulse
           fillTopSub(cx, cy, hw, hh, i, j, col);
         }
