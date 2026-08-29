@@ -22,7 +22,7 @@
 
   // ---- Internal (low) resolution. Everything is drawn here, then upscaled. ----
   // ~4x the pixel count of the old 320x180 frame: crisper upscaling AND room for
-  // much finer per-tile texture (flecks, dither, gradients) — a real detail pass.
+  // much finer per-tile texture — dense flat-coloured flecks/dither, no gradients.
   const RW = 640;
   const RH = 360;
 
@@ -212,6 +212,25 @@
     return [sx, sy];
   }
 
+  // Scatter flat-coloured flecks across a cliff side face (a parallelogram spanning
+  // from the outer top corner (ox,oy) down the drop). Adds detail density without
+  // any gradient — the dots are two flat shades of the face's own flat colour.
+  function cliffFlecks(ox, oy, ix, iy, drop, faceCol, cell, seed) {
+    const n = 7;
+    const dark = shadeBy(faceCol, 0.82);
+    const light = shadeBy(faceCol, 1.14);
+    for (let i = 0; i < n; i++) {
+      const r1 = hash2(cell.x * 19 + i * 37 + seed + 1, cell.y * 31 + i * 53 + seed + 2);
+      const r2 = hash2(cell.x * 43 + i * 61 + seed + 3, cell.y * 11 + i * 29 + seed + 4);
+      // s: horizontal position along top edge (outer->inner), d: down the drop
+      const s = r1, d = r2;
+      const tx = ox + (ix - ox) * s;
+      const ty = oy + (iy - oy) * s + d * drop;
+      ctx.fillStyle = (i + cell.x + cell.y) % 2 === 0 ? dark : light;
+      ctx.fillRect(Math.round(tx), Math.round(ty), 1, 1);
+    }
+  }
+
   // Draw one terrain tile: its top diamond, plus SW/SE cliff faces only where the
   // downhill neighbour (in screen terms) is lower — real local cliffs, no walls.
   function drawTile(cell) {
@@ -254,17 +273,15 @@
     const hRight = neighbourH(cell.rx + 1, cell.ry);
 
     const baseTop = emissive ? t.shade : top; // cliffs use the ground material, not glow
-    // Lighter cliff shading than before (bright palette shouldn't read as black
-    // walls), with a subtle top-to-bottom gradient so curved forms show banding.
-    const leftTop = shadeBy(baseTop, 0.80), leftBot = shadeBy(baseTop, 0.62);
-    const rightTop = shadeBy(baseTop, 0.66), rightBot = shadeBy(baseTop, 0.50);
+    // FLAT cliff shading: each face is one solid fill (side faces read darker than
+    // the top face for basic fake-lighting — that's two flat tones, not a gradient).
+    const leftFlat = shadeBy(baseTop, 0.72);
+    const rightFlat = shadeBy(baseTop, 0.56);
 
-    // Left (SW-facing) face — vertical light-to-dark gradient
+    // Left (SW-facing) face — single flat fill
     if (t.h > hLeft) {
       const drop = (t.h - hLeft) * CUBE_H;
-      const g = ctx.createLinearGradient(0, cy, 0, cy + hh + drop);
-      g.addColorStop(0, leftTop); g.addColorStop(1, leftBot);
-      ctx.fillStyle = g;
+      ctx.fillStyle = leftFlat;
       ctx.beginPath();
       ctx.moveTo(cx - hw, cy);
       ctx.lineTo(cx, cy + hh);
@@ -272,13 +289,13 @@
       ctx.lineTo(cx - hw, cy + drop);
       ctx.closePath();
       ctx.fill();
+      // Flat texture flecks scattered on the cliff face for detail density.
+      cliffFlecks(cx - hw, cy, cx, cy + hh, drop, leftFlat, cell, 0);
     }
-    // Right (SE-facing) face — vertical light-to-dark gradient
+    // Right (SE-facing) face — single flat fill
     if (t.h > hRight) {
       const drop = (t.h - hRight) * CUBE_H;
-      const g = ctx.createLinearGradient(0, cy, 0, cy + hh + drop);
-      g.addColorStop(0, rightTop); g.addColorStop(1, rightBot);
-      ctx.fillStyle = g;
+      ctx.fillStyle = rightFlat;
       ctx.beginPath();
       ctx.moveTo(cx + hw, cy);
       ctx.lineTo(cx, cy + hh);
@@ -286,20 +303,13 @@
       ctx.lineTo(cx + hw, cy + drop);
       ctx.closePath();
       ctx.fill();
+      // Flat texture flecks scattered on the cliff face for detail density.
+      cliffFlecks(cx + hw, cy, cx, cy + hh, drop, rightFlat, cell, 100);
     }
 
     // ---- Top face (diamond) ----
-    // A gentle top-lit gradient across the diamond (bright at the back/top edge,
-    // a touch darker toward the front) gives every face soft shading instead of a
-    // single flat fill.
-    if (emissive) {
-      ctx.fillStyle = top;
-    } else {
-      const g = ctx.createLinearGradient(0, cy - hh, 0, cy + hh);
-      g.addColorStop(0, shadeBy(top, 1.10));
-      g.addColorStop(1, shadeBy(top, 0.90));
-      ctx.fillStyle = g;
-    }
+    // FLAT: one solid fill for the whole diamond top — no gradient, no banding.
+    ctx.fillStyle = top;
     ctx.beginPath();
     ctx.moveTo(cx, cy - hh);
     ctx.lineTo(cx + hw, cy);
@@ -309,12 +319,12 @@
     ctx.fill();
 
     // ---- Per-tile fleck texture + decorative details ----
-    // Cheap procedural speckle: a handful of deterministic 1px dots scattered
-    // inside the diamond, in the material's fleck colours — grass blades, pebbles,
-    // ripples. Big fidelity payoff, matching the reference's fine texture.
+    // Dense procedural speckle: many deterministic 1px dots scattered inside the
+    // diamond, in the material's flat fleck colours — grass blades, pebbles,
+    // ripples. All flat-coloured dots (no gradients); density carries the detail.
     if (!emissive) {
       const flecks = FLECKS[t.mat] || FLECKS.grass;
-      const n = t.mat === "water" ? 5 : 7;
+      const n = t.mat === "water" ? 12 : 16;   // much denser than before
       for (let i = 0; i < n; i++) {
         const r1 = hash2(cell.x * 13 + i * 91 + 3, cell.y * 17 + i * 57 + 5);
         const r2 = hash2(cell.x * 29 + i * 41 + 7, cell.y * 23 + i * 71 + 9);
@@ -325,13 +335,10 @@
         const fy = Math.round(cy + v * hh);
         const col = flecks[Math.floor(hash2(cell.x + i * 3, cell.y + i * 5) * flecks.length)];
         ctx.fillStyle = col;
-        // slightly larger, brighter tufts occasionally for grass
-        const big = t.mat === "grass" && r1 > 0.86;
+        // slightly larger tufts occasionally for grass — still flat colour
+        const big = t.mat === "grass" && r1 > 0.88;
         ctx.fillRect(fx, fy, big ? 2 : 1, 1);
       }
-      // A soft top highlight streak along the back edges for a rounded read.
-      ctx.fillStyle = shadeBy(top, 1.18);
-      ctx.fillRect(Math.round(cx - hw * 0.35), Math.round(cy - hh * 0.55), Math.max(2, Math.round(hw * 0.5)), 1);
     }
 
     // faint glow ring around emissive tiles
