@@ -38,13 +38,12 @@
   // ---- Isometric projection constants ----
   const TW = 32;            // tile width  (full diamond width)
   const TH = 16;            // tile height (full diamond height) -> 2:1 dimetric
-  const CUBE_H = 14;        // vertical pixels per elevation level (cliff height)
 
   // ---- World dimensions ----
   // Grid is deliberately larger than the screen can show, so terrain runs off
   // every edge and there is never a visible boundary / floating-island edge.
+  // The map is a single FLAT plane — no elevation, no cliffs (removed).
   const SIZE = 64;          // 64 x 64 tiles — overspills the 320x180 frame on all sides
-  const MAXH = 3;           // elevation levels: 0,1,2 (mostly 0/1, rare 2)
 
   // Ground palette. A tile picks a base "material" then a shade of it. Every
   // face colour derives from the top colour so cliffs read as the same material.
@@ -68,11 +67,19 @@
   const GRASS_TONES = ["#5f9e39", "#74b845", "#8ace55", "#a6e070"];
   // Slightly darker green used to outline the diamond border for a "cut" look.
   const GRASS_EDGE = "#4e8a2e";
-  // Grass cliff (dirt-under-grass) masonry palette: clod fill, darker mortar
-  // outline between clods, and a green crown line at the very top of the cliff.
-  const GRASS_CLIFF_FILL = ["#9c7b45", "#8a6c3b", "#ac8a52"]; // earthy clod tones
-  const GRASS_CLIFF_MORTAR = "#6d5329"; // darker outline between clods
-  const GRASS_CLIFF_CROWN = "#5f9e39";  // grassy lip along the cliff top edge
+
+  // ---- Per-material clustered tone palettes (dirt/sand/rock/water) ----------
+  // Same spirit as GRASS_TONES: each material top-face is quantised into 3-4
+  // close tones of its own palette; deterministic value-noise (or a material-
+  // specific structured pattern) decides which tone each sub-cell lands on, so
+  // the result reads as organic clumps / seams / grain — never flat, speckle,
+  // or a gradient. Ordered darkest → lightest.
+  const DIRT_TONES  = ["#a5814f", "#bd9560", "#c9a06a", "#d8b47f"]; // patchy clods
+  const DIRT_FLECK  = "#6f5330"; // occasional dark pebble / root fleck
+  const SAND_TONES  = ["#d8c384", "#e2cf92", "#ecd99f", "#f4e4ad"]; // fine grain
+  const ROCK_TONES  = ["#9aa4b0", "#a5aeb9", "#b3bcc6", "#c2cad3"]; // flagstone
+  const ROCK_SEAM   = "#7c8794"; // dark seam/crack between flagstones
+  const WATER_TONES = ["#3fb6df", "#4ec3e8", "#5fcef0", "#7ddbf5"]; // ripple bands
 
   // Each unit tile is built out of a SUB x SUB grid of little voxel cells (mini
   // isometric cubes) rather than one big flat diamond. That fine subdivision — not
@@ -102,25 +109,16 @@
     return smooth(smooth(v00, v10, xf), smooth(v01, v11, xf), yf);
   }
 
-  // ---- Build the world: a flat-ish heightmap + per-tile material/shade. ----
-  // Each tile: { h: elevation 0..MAXH-1, mat: key, shade: hex, energy: null|key }
+  // ---- Build the world: a single FLAT plane + per-tile material/shade. ----
+  // Elevation was removed — the whole map renders as one flat level. Each tile:
+  // { mat: key, shade: hex, energy: null|key }
   const tiles = [];
 
-  function terrainHeight(x, y) {
-    // Broad low-frequency undulation → mostly level, occasional gentle rise.
-    const n = valueNoise(x * 0.08, y * 0.08);
-    // Bias hard toward the low end so most of the map is walking-height.
-    if (n > 0.82) return 2;   // rare high mesa
-    if (n > 0.58) return 1;   // occasional gentle rise
-    return 0;                 // the common ground level
-  }
-
-  function pickMaterial(x, y, h) {
-    // High ground tends rocky; a separate low-freq field carves dirt/sand patches
-    // and a broad low-lying field pools bright water so the map reads varied.
-    if (h >= 2) return "rock";
+  function pickMaterial(x, y) {
+    // Low-freq fields carve dirt/rock/sand patches and pool bright water so the
+    // flat map still reads as varied terrain. (No height dependence any more.)
     const water = valueNoise(x * 0.06 - 80, y * 0.06 - 80);
-    if (h === 0 && water > 0.80) return "water";
+    if (water > 0.80) return "water";
     const patch = valueNoise(x * 0.13 + 40, y * 0.13 + 40);
     const patch2 = valueNoise(x * 0.21 - 15, y * 0.21 - 15);
     if (patch > 0.82) return "rock";
@@ -132,11 +130,10 @@
   for (let x = 0; x < SIZE; x++) {
     tiles[x] = [];
     for (let y = 0; y < SIZE; y++) {
-      const h = terrainHeight(x, y);
-      const mat = pickMaterial(x, y, h);
+      const mat = pickMaterial(x, y);
       const pool = MATERIALS[mat];
       const shade = pool[Math.floor(hash2(x + 7, y + 13) * pool.length)];
-      tiles[x][y] = { h, mat, shade, energy: null };
+      tiles[x][y] = { mat, shade, energy: null };
     }
   }
 
@@ -199,29 +196,15 @@
       case 3: return [n - y, x];
     }
   }
-  // inverse — rotated space back to world indices, for neighbour lookups
-  function unrotate(rx, ry, r) {
-    const n = SIZE - 1;
-    r = ((r % 4) + 4) % 4;
-    switch (r) {
-      case 0: return [rx, ry];
-      case 1: return [n - ry, rx];
-      case 2: return [n - rx, n - ry];
-      case 3: return [ry, n - rx];
-    }
-  }
-
   // Center the grid so its middle sits mid-screen and it overspills all edges.
   // In rotated space the grid center is (n/2, n/2); we offset the origin so that
-  // projects to the middle of the frame.
-  function project(rx, ry, h) {
+  // projects to the middle of the frame. Flat plane — no height term.
+  function project(rx, ry) {
     const n = SIZE - 1;
-    const cx = (n / 2 - n / 2) * (TW / 2); // 0, kept for clarity
-    void cx;
     const originX = RW / 2 + panX;
     const originY = RH / 2 + panY;
     const sx = originX + ((rx - n / 2) - (ry - n / 2)) * (TW / 2);
-    const sy = originY + ((rx - n / 2) + (ry - n / 2)) * (TH / 2) - h * CUBE_H;
+    const sy = originY + ((rx - n / 2) + (ry - n / 2)) * (TH / 2);
     return [sx, sy];
   }
 
@@ -265,6 +248,78 @@
     return GRASS_TONES[idx];
   }
 
+  // ---- Per-material top-face texture functions --------------------------------
+  // Each mirrors grassTone's spirit: continuous fields (seeded on world tile
+  // coords so patterns flow across tile borders, no visible tiling) quantised
+  // into a material's close-tone palette. Returned as a hex/rgb string per
+  // sub-cell. Distinct STRUCTURE per material — clods, grain, flagstones, ripple
+  // bands — so each reads differently from the others. No gradients, no speckle.
+
+  // DIRT: patchy clods — broad blobby clusters (like grass but on tan tones),
+  // with the occasional darker pebble/root fleck stamped on isolated cells.
+  function dirtTone(gx, gy, u, v) {
+    const fx = gx + u, fy = gy + v;
+    let n = valueNoise(fx * 2.4 + 5.5, fy * 2.4 + 18.2) * 0.66
+          + valueNoise(fx * 6.3 - 7.7, fy * 6.3 + 2.1) * 0.34;
+    n = Math.max(0, Math.min(0.999, (n - 0.22) / 0.56));
+    // occasional dark fleck: high-frequency field spikes on a few scattered cells
+    const fleck = valueNoise(fx * 9.7 + 30.0, fy * 9.7 - 12.0);
+    if (fleck > 0.86) return DIRT_FLECK;
+    const idx = Math.min(DIRT_TONES.length - 1, Math.floor(n * DIRT_TONES.length));
+    return DIRT_TONES[idx];
+  }
+
+  // SAND: fine tight grain — a high-frequency ordered dither so it reads as a
+  // dense even grain rather than big blobs. A gentle low-freq drift keeps whole
+  // dunes very slightly lighter/darker without ever banding.
+  function sandTone(gx, gy, u, v) {
+    const fx = gx + u, fy = gy + v;
+    // per-sub-cell hash gives the tight grain; low-freq noise biases the level.
+    const grain = hash2(Math.round(fx * SUB) + 101, Math.round(fy * SUB) + 202);
+    const drift = valueNoise(fx * 1.3 + 60.0, fy * 1.3 - 40.0); // 0..1 slow
+    let n = grain * 0.7 + drift * 0.3;
+    n = Math.max(0, Math.min(0.999, n));
+    const idx = Math.min(SAND_TONES.length - 1, Math.floor(n * SAND_TONES.length));
+    return SAND_TONES[idx];
+  }
+
+  // ROCK: cracked flagstone / tile-seams. A cell field partitions the surface
+  // into irregular flagstones (all cells of one stone share a tone); the thin
+  // border between neighbouring stones is drawn as a dark seam.
+  function rockTone(gx, gy, u, v) {
+    const fx = gx + u, fy = gy + v;
+    // Which flagstone does this point belong to? Snap to a coarse jittered grid.
+    const cellSize = 0.5; // ~2 flagstones across a tile
+    // jitter each grid node so seams aren't a perfect lattice
+    const gxx = Math.floor(fx / cellSize), gyy = Math.floor(fy / cellSize);
+    // distance to nearest seam line, in this jittered grid (Manhattan-ish)
+    const jx = hash2(gxx + 3, gyy + 9) * 0.28;   // seam offset within the cell
+    const jy = hash2(gxx + 12, gyy + 4) * 0.28;
+    const lx = (fx / cellSize) - gxx;            // 0..1 within grid cell
+    const ly = (fy / cellSize) - gyy;
+    const seam = Math.min(Math.abs(lx - jx), Math.abs(1 - lx - jx),
+                          Math.abs(ly - jy), Math.abs(1 - ly - jy));
+    if (seam < 0.10) return ROCK_SEAM;           // dark crack between stones
+    // each flagstone gets one of the light stone tones, deterministically
+    const idx = Math.floor(hash2(gxx * 2 + 1, gyy * 2 + 7) * ROCK_TONES.length);
+    return ROCK_TONES[Math.min(ROCK_TONES.length - 1, idx)];
+  }
+
+  // WATER: horizontal flowing ripple bands. Tone is driven mostly by SCREEN-ish
+  // horizontal position (v across the tile) warped by a slow noise so the bands
+  // undulate like moving water, plus a subtle animated drift over time.
+  function waterTone(gx, gy, u, v) {
+    const fx = gx + u, fy = gy + v;
+    // horizontal bands: use (u+v) which runs along the flat "waterline" axis,
+    // warped by low-freq noise so the bands wave rather than stripe perfectly.
+    const warp = valueNoise(fx * 1.7 + 50.0, fy * 1.7 + 15.0) - 0.5;
+    const band = Math.sin((fx + fy) * 3.4 + warp * 4.0 + now * 0.0016);
+    let n = 0.5 + 0.5 * band;                    // 0..1 across the band cycle
+    n = Math.max(0, Math.min(0.999, n));
+    const idx = Math.min(WATER_TONES.length - 1, Math.floor(n * WATER_TONES.length));
+    return WATER_TONES[idx];
+  }
+
   // Fill one small isometric sub-diamond of a tile's TOP face. The top face is a
   // diamond centred at (cx,cy) with half-width hw / half-height hh. In its (u,v)
   // unit-square space a point maps to
@@ -285,92 +340,13 @@
     ctx.fill();
   }
 
-  // Fill one small cell of a cliff SIDE face. The face is a parallelogram: outer
-  // top corner (ox,oy), inner top corner (ix,iy), dropping straight down by `drop`.
-  // (a,b) index the cell across the top edge (a) and down the drop (b).
-  function fillSideSub(ox, oy, ix, iy, drop, rows, a, b, col) {
-    const sa = 1 / SUB, sb = 1 / rows;
-    const ex = ix - ox, ey = iy - oy;         // along the top edge
-    const a0 = a * sa, a1 = (a + 1) * sa, b0 = b * sb, b1 = (b + 1) * sb;
-    const px = (u, v) => ox + ex * u;
-    const py = (u, v) => oy + ey * u + v * drop;
-    ctx.fillStyle = col;
-    ctx.beginPath();
-    ctx.moveTo(px(a0, b0), py(a0, b0));
-    ctx.lineTo(px(a1, b0), py(a1, b0));
-    ctx.lineTo(px(a1, b1), py(a1, b1));
-    ctx.lineTo(px(a0, b1), py(a0, b1));
-    ctx.closePath();
-    ctx.fill();
-  }
-
-  // Draw a grass cliff (dirt-under-grass) SIDE face as MASONRY: loose offset
-  // rows of outlined dirt-clod shapes, plus a grassy crown along the top edge —
-  // like the reference's stonework side faces, not a flat two-tone fill.
-  // Geometry matches fillSideSub: outer top corner (ox,oy) → inner top corner
-  // (ix,iy) along the top edge, everything dropping straight down by `drop`.
-  // `dark` is the SE/SW shading factor so the two faces stay differently lit.
-  function fillGrassCliff(ox, oy, ix, iy, drop, levels, dark, seedx, seedy) {
-    const ex = ix - ox, ey = iy - oy;         // vector along the top edge
-    const px = (u, v) => ox + ex * u;
-    const py = (u, v) => oy + ey * u + v * drop;
-    const cols = SUB;                           // clods across the face
-    const rowsPerLevel = 3;                     // courses of clods per elevation
-    const rows = rowsPerLevel * levels;
-    const du = 1 / cols, dv = 1 / rows;
-    // grassy crown band: a thin lip of grass green at the very top of the cliff
-    const crownV = Math.min(0.16, 4 / drop);
-    for (let a = 0; a < cols; a++) {
-      ctx.fillStyle = shadeBy(GRASS_CLIFF_CROWN, dark);
-      ctx.beginPath();
-      ctx.moveTo(px(a * du, 0), py(a * du, 0));
-      ctx.lineTo(px((a + 1) * du, 0), py((a + 1) * du, 0));
-      ctx.lineTo(px((a + 1) * du, crownV), py((a + 1) * du, crownV));
-      ctx.lineTo(px(a * du, crownV), py(a * du, crownV));
-      ctx.closePath();
-      ctx.fill();
-    }
-    // clod courses below the crown, each row offset by half a clod
-    for (let r = 0; r < rows; r++) {
-      const v0 = crownV + (1 - crownV) * (r / rows);
-      const v1 = crownV + (1 - crownV) * ((r + 1) / rows);
-      const off = (r % 2) * 0.5 * du;           // brick-style offset rows
-      for (let a = -1; a < cols; a++) {
-        const u0 = a * du + off, u1 = (a + 1) * du + off;
-        const cu0 = Math.max(0, u0), cu1 = Math.min(1, u1);
-        if (cu1 <= cu0) continue;
-        const idx = Math.floor(hash2(seedx + a * 3 + r, seedy + r * 5 - a) * GRASS_CLIFF_FILL.length);
-        const fill = shadeBy(GRASS_CLIFF_FILL[idx], dark);
-        // inset the clod a hair inside its cell so the mortar shows as an outline
-        const inU = (cu1 - cu0) * 0.14, inV = (v1 - v0) * 0.16;
-        const cx0 = cu0 + inU, cx1 = cu1 - inU, cy0 = v0 + inV, cy1 = v1 - inV;
-        // mortar background block (darker) then the clod on top
-        ctx.fillStyle = shadeBy(GRASS_CLIFF_MORTAR, dark);
-        ctx.beginPath();
-        ctx.moveTo(px(cu0, v0), py(cu0, v0));
-        ctx.lineTo(px(cu1, v0), py(cu1, v0));
-        ctx.lineTo(px(cu1, v1), py(cu1, v1));
-        ctx.lineTo(px(cu0, v1), py(cu0, v1));
-        ctx.closePath();
-        ctx.fill();
-        ctx.fillStyle = fill;
-        ctx.beginPath();
-        ctx.moveTo(px(cx0, cy0), py(cx0, cy0));
-        ctx.lineTo(px(cx1, cy0), py(cx1, cy0));
-        ctx.lineTo(px(cx1, cy1), py(cx1, cy1));
-        ctx.lineTo(px(cx0, cy1), py(cx0, cy1));
-        ctx.closePath();
-        ctx.fill();
-      }
-    }
-  }
-
-  // Draw one terrain tile: its top diamond, plus SW/SE cliff faces only where the
-  // downhill neighbour (in screen terms) is lower — real local cliffs, no walls.
+  // Draw one terrain tile: a single flat top diamond, subdivided into a 4x4 grid
+  // of tiny voxel sub-diamonds. Elevation/cliffs were removed — the whole map is
+  // one flat plane, so there are no side faces.
   function drawTile(cell) {
     const t = tiles[cell.x][cell.y];
-    const [cx, cy] = project(cell.rx, cell.ry, t.h);
-    if (cx < -TW || cx > RW + TW || cy < -TH || cy > RH + CUBE_H * MAXH + TH) return;
+    const [cx, cy] = project(cell.rx, cell.ry);
+    if (cx < -TW || cx > RW + TW || cy < -TH || cy > RH + TH) return;
 
     const hw = TW / 2, hh = TH / 2;
 
@@ -384,58 +360,6 @@
     if (emissive || hl) {
       const p = 0.5 + 0.5 * Math.sin(now * 0.004 + cell.x * 0.3 + cell.y * 0.2);
       top = mix(top, "#ffffff", 0.15 + 0.4 * p);
-    }
-
-    // ---- Cliff side faces (only toward lower neighbours) ----
-    // Screen-down-left neighbour is rotated (rx, ry+1); down-right is (rx+1, ry).
-    // Draw a face when THIS tile is higher than that neighbour (or the neighbour
-    // is off-grid AND this tile sits above base — but base tiles show nothing, so
-    // off-grid neighbours never make a wall).
-    function neighbourH(nrx, nry) {
-      const [wx, wy] = unrotate(nrx, nry, rot);
-      if (wx < 0 || wy < 0 || wx >= SIZE || wy >= SIZE) return t.h; // treat as equal → no wall
-      return tiles[wx][wy].h;
-    }
-    const hLeft = neighbourH(cell.rx, cell.ry + 1);
-    const hRight = neighbourH(cell.rx + 1, cell.ry);
-
-    const baseTop = emissive ? t.shade : top; // cliffs use the ground material, not glow
-    // FLAT cliff shading: each face is one solid fill (side faces read darker than
-    // the top face for basic fake-lighting — that's two flat tones, not a gradient).
-    const leftFlat = shadeBy(baseTop, 0.72);
-    const rightFlat = shadeBy(baseTop, 0.56);
-
-    const isGrass = t.mat === "grass" && !emissive;
-    // Left (SW-facing) face. Grass gets masonry/clod stonework; other materials
-    // keep the flat voxel-cell subdivision (untouched this pass).
-    if (t.h > hLeft) {
-      const levels = t.h - hLeft;
-      const drop = levels * CUBE_H;
-      if (isGrass) {
-        fillGrassCliff(cx - hw, cy, cx, cy + hh, drop, levels, 0.78, cell.x * 2, cell.y * 2 + 7);
-      } else {
-        const rows = SUB * levels;
-        for (let a = 0; a < SUB; a++)
-          for (let b = 0; b < rows; b++) {
-            const col = subShade(leftFlat, cell.x * 2, cell.y * 2 + 7, a, b);
-            fillSideSub(cx - hw, cy, cx, cy + hh, drop, rows, a, b, col);
-          }
-      }
-    }
-    // Right (SE-facing) face — darker lit than the left.
-    if (t.h > hRight) {
-      const levels = t.h - hRight;
-      const drop = levels * CUBE_H;
-      if (isGrass) {
-        fillGrassCliff(cx + hw, cy, cx, cy + hh, drop, levels, 0.6, cell.x * 2 + 5, cell.y * 2);
-      } else {
-        const rows = SUB * levels;
-        for (let a = 0; a < SUB; a++)
-          for (let b = 0; b < rows; b++) {
-            const col = subShade(rightFlat, cell.x * 2 + 5, cell.y * 2, a, b);
-            fillSideSub(cx + hw, cy, cx, cy + hh, drop, rows, a, b, col);
-          }
-      }
     }
 
     // ---- Top face: a 4x4 grid of tiny voxel sub-diamonds ----
@@ -467,12 +391,28 @@
           const onUpperEdge = i === 0 || j === 0;
           if (onLowerEdge) col = mix(col, GRASS_EDGE, 0.5);
           else if (onUpperEdge) col = mix(col, GRASS_EDGE, 0.22);
+          if (hl) col = mix(col, top, 0.6); // fold in the highlight pulse
           fillTopSub(cx, cy, hw, hh, i, j, col);
         }
     } else {
+      // Dirt / sand / rock / water: each material's own clustered/patterned tone
+      // function fills the sub-cells (same quality bar as grass, distinct look
+      // per material). Highlighted (energized) non-emissive tiles blend their
+      // textured colour toward the pulse so the click feedback still reads.
+      const s = 1 / SUB;
+      const toneFn = t.mat === "dirt" ? dirtTone
+                   : t.mat === "sand" ? sandTone
+                   : t.mat === "rock" ? rockTone
+                   : t.mat === "water" ? waterTone
+                   : null;
       for (let i = 0; i < SUB; i++)
-        for (let j = 0; j < SUB; j++)
-          fillTopSub(cx, cy, hw, hh, i, j, subShade(top, cell.x, cell.y, i, j));
+        for (let j = 0; j < SUB; j++) {
+          const u = (i + 0.5) * s, v = (j + 0.5) * s;
+          let col = toneFn ? toneFn(cell.x, cell.y, u, v)
+                           : subShade(top, cell.x, cell.y, i, j);
+          if (hl) col = mix(col, top, 0.6); // fold in the highlight pulse
+          fillTopSub(cx, cy, hw, hh, i, j, col);
+        }
     }
 
     // faint glow ring around emissive tiles
@@ -531,9 +471,8 @@
 
     // Hovered-tile outline
     if (hover) {
-      const t = tiles[hover.gx][hover.gy];
       const [rx, ry] = rotateCoord(hover.gx, hover.gy, rot);
-      const [px, py] = project(rx, ry, t.h);
+      const [px, py] = project(rx, ry);
       ctx.strokeStyle = "#ffffff";
       ctx.lineWidth = 1;
       ctx.beginPath();
