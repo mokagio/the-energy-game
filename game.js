@@ -13,8 +13,11 @@
  *   - Side (cliff) faces are drawn ONLY where a tile is taller than its downhill
  *     neighbour — i.e. real local cliffs/ramps — never as a wall around the map
  *     boundary (there is no visible boundary).
- *   - Ground colour varies per tile (several grass shades + dirt/sand + rock),
- *     with a light ordered-dither so it doesn't read as one flat slab.
+ *   - Every unit tile is itself a 4x4 grid of tiny voxel cells (mini-cubes), so a
+ *     single map square reads as a dense little voxel cluster, not one large flat
+ *     block face — the opposite of Minecraft's one-big-textured-square-per-face.
+ *   - Each sub-cell picks from a couple of close shades of the tile's base colour
+ *     (deterministic, quiet) for subtle texture — no loud scattered colour noise.
  */
 
 (() => {
@@ -22,7 +25,7 @@
 
   // ---- Internal (low) resolution. Everything is drawn here, then upscaled. ----
   // ~4x the pixel count of the old 320x180 frame: crisper upscaling AND room for
-  // much finer per-tile texture — dense flat-coloured flecks/dither, no gradients.
+  // the fine 4x4 voxel sub-grid rendered inside every unit tile, no gradients.
   const RW = 640;
   const RH = 360;
 
@@ -57,15 +60,11 @@
     water: ["#4ec3e8", "#3fb6df", "#5fcef0"],   // clean bright blue
   };
 
-  // Per-material fleck colours: the tiny scattered detail dots (blades, pebbles,
-  // ripples) drawn on top of each tile face, matching the reference's speckle.
-  const FLECKS = {
-    grass: ["#9fe06a", "#63a43a", "#b6ee80"],
-    dirt:  ["#e0bd85", "#a97f4f"],
-    sand:  ["#f4e6b4", "#c9b070"],
-    rock:  ["#d3dae2", "#8f98a4"],
-    water: ["#8ee0f7", "#2f9fc9"],
-  };
+  // Each unit tile is built out of a SUB x SUB grid of little voxel cells (mini
+  // isometric cubes) rather than one big flat diamond. That fine subdivision — not
+  // scattered colour flecks — is what carries the detail and reads as dense voxel
+  // art instead of one flat Minecraft block face.
+  const SUB = 4;            // 4x4 voxel cells per unit tile
 
   // Energy (emissive) tile top colours — these pulse with the energy theme.
   const ENERGY = {
@@ -212,23 +211,52 @@
     return [sx, sy];
   }
 
-  // Scatter flat-coloured flecks across a cliff side face (a parallelogram spanning
-  // from the outer top corner (ox,oy) down the drop). Adds detail density without
-  // any gradient — the dots are two flat shades of the face's own flat colour.
-  function cliffFlecks(ox, oy, ix, iy, drop, faceCol, cell, seed) {
-    const n = 7;
-    const dark = shadeBy(faceCol, 0.82);
-    const light = shadeBy(faceCol, 1.14);
-    for (let i = 0; i < n; i++) {
-      const r1 = hash2(cell.x * 19 + i * 37 + seed + 1, cell.y * 31 + i * 53 + seed + 2);
-      const r2 = hash2(cell.x * 43 + i * 61 + seed + 3, cell.y * 11 + i * 29 + seed + 4);
-      // s: horizontal position along top edge (outer->inner), d: down the drop
-      const s = r1, d = r2;
-      const tx = ox + (ix - ox) * s;
-      const ty = oy + (iy - oy) * s + d * drop;
-      ctx.fillStyle = (i + cell.x + cell.y) % 2 === 0 ? dark : light;
-      ctx.fillRect(Math.round(tx), Math.round(ty), 1, 1);
-    }
+  // Quiet per-sub-cell shade: pick one of 3 close shades of the face colour,
+  // deterministically from the cell's world coords + sub index. This is the ONLY
+  // texture now — a small ±brightness step, nowhere near the old fleck-dot noise.
+  const SUB_SHADES = [0.94, 1.0, 1.07];
+  function subShade(baseCol, gx, gy, i, j) {
+    const idx = Math.floor(hash2(gx * 4 + i + 1, gy * 4 + j + 2) * SUB_SHADES.length);
+    return shadeBy(baseCol, SUB_SHADES[idx]);
+  }
+
+  // Fill one small isometric sub-diamond of a tile's TOP face. The top face is a
+  // diamond centred at (cx,cy) with half-width hw / half-height hh. In its (u,v)
+  // unit-square space a point maps to
+  //   px = cx + (u - v) * hw ,  py = cy + (u + v - 1) * hh .
+  // (i,j) is the sub-cell; each spans 1/SUB in u and v.
+  function fillTopSub(cx, cy, hw, hh, i, j, col) {
+    const s = 1 / SUB;
+    const u0 = i * s, u1 = (i + 1) * s, v0 = j * s, v1 = (j + 1) * s;
+    const px = (u, v) => cx + (u - v) * hw;
+    const py = (u, v) => cy + (u + v - 1) * hh;
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.moveTo(px(u0, v0), py(u0, v0));
+    ctx.lineTo(px(u1, v0), py(u1, v0));
+    ctx.lineTo(px(u1, v1), py(u1, v1));
+    ctx.lineTo(px(u0, v1), py(u0, v1));
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Fill one small cell of a cliff SIDE face. The face is a parallelogram: outer
+  // top corner (ox,oy), inner top corner (ix,iy), dropping straight down by `drop`.
+  // (a,b) index the cell across the top edge (a) and down the drop (b).
+  function fillSideSub(ox, oy, ix, iy, drop, rows, a, b, col) {
+    const sa = 1 / SUB, sb = 1 / rows;
+    const ex = ix - ox, ey = iy - oy;         // along the top edge
+    const a0 = a * sa, a1 = (a + 1) * sa, b0 = b * sb, b1 = (b + 1) * sb;
+    const px = (u, v) => ox + ex * u;
+    const py = (u, v) => oy + ey * u + v * drop;
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.moveTo(px(a0, b0), py(a0, b0));
+    ctx.lineTo(px(a1, b0), py(a1, b0));
+    ctx.lineTo(px(a1, b1), py(a1, b1));
+    ctx.lineTo(px(a0, b1), py(a0, b1));
+    ctx.closePath();
+    ctx.fill();
   }
 
   // Draw one terrain tile: its top diamond, plus SW/SE cliff faces only where the
@@ -252,13 +280,6 @@
       top = mix(top, "#ffffff", 0.15 + 0.4 * p);
     }
 
-    // Ordered-dither: nudge brightness per-pixel-tile so flat ground shimmers a
-    // little with texture instead of reading as a solid slab.
-    if (!emissive) {
-      const d = ((cell.x * 7 + cell.y * 13) % 5) - 2; // -2..2
-      top = shadeBy(top, 1 + d * 0.024);
-    }
-
     // ---- Cliff side faces (only toward lower neighbours) ----
     // Screen-down-left neighbour is rotated (rx, ry+1); down-right is (rx+1, ry).
     // Draw a face when THIS tile is higher than that neighbour (or the neighbour
@@ -278,67 +299,44 @@
     const leftFlat = shadeBy(baseTop, 0.72);
     const rightFlat = shadeBy(baseTop, 0.56);
 
-    // Left (SW-facing) face — single flat fill
+    // Left (SW-facing) face — sliced into a SUB-wide grid of little voxel cells,
+    // each a quiet shade of the flat face colour (rows scale with the drop height).
     if (t.h > hLeft) {
-      const drop = (t.h - hLeft) * CUBE_H;
-      ctx.fillStyle = leftFlat;
-      ctx.beginPath();
-      ctx.moveTo(cx - hw, cy);
-      ctx.lineTo(cx, cy + hh);
-      ctx.lineTo(cx, cy + hh + drop);
-      ctx.lineTo(cx - hw, cy + drop);
-      ctx.closePath();
-      ctx.fill();
-      // Flat texture flecks scattered on the cliff face for detail density.
-      cliffFlecks(cx - hw, cy, cx, cy + hh, drop, leftFlat, cell, 0);
+      const levels = t.h - hLeft;
+      const drop = levels * CUBE_H;
+      const rows = SUB * levels;
+      for (let a = 0; a < SUB; a++)
+        for (let b = 0; b < rows; b++) {
+          const col = subShade(leftFlat, cell.x * 2, cell.y * 2 + 7, a, b);
+          fillSideSub(cx - hw, cy, cx, cy + hh, drop, rows, a, b, col);
+        }
     }
-    // Right (SE-facing) face — single flat fill
+    // Right (SE-facing) face — same voxel-cell subdivision.
     if (t.h > hRight) {
-      const drop = (t.h - hRight) * CUBE_H;
-      ctx.fillStyle = rightFlat;
-      ctx.beginPath();
-      ctx.moveTo(cx + hw, cy);
-      ctx.lineTo(cx, cy + hh);
-      ctx.lineTo(cx, cy + hh + drop);
-      ctx.lineTo(cx + hw, cy + drop);
-      ctx.closePath();
-      ctx.fill();
-      // Flat texture flecks scattered on the cliff face for detail density.
-      cliffFlecks(cx + hw, cy, cx, cy + hh, drop, rightFlat, cell, 100);
+      const levels = t.h - hRight;
+      const drop = levels * CUBE_H;
+      const rows = SUB * levels;
+      for (let a = 0; a < SUB; a++)
+        for (let b = 0; b < rows; b++) {
+          const col = subShade(rightFlat, cell.x * 2 + 5, cell.y * 2, a, b);
+          fillSideSub(cx + hw, cy, cx, cy + hh, drop, rows, a, b, col);
+        }
     }
 
-    // ---- Top face (diamond) ----
-    // FLAT: one solid fill for the whole diamond top — no gradient, no banding.
-    ctx.fillStyle = top;
-    ctx.beginPath();
-    ctx.moveTo(cx, cy - hh);
-    ctx.lineTo(cx + hw, cy);
-    ctx.lineTo(cx, cy + hh);
-    ctx.lineTo(cx - hw, cy);
-    ctx.closePath();
-    ctx.fill();
-
-    // ---- Per-tile fleck texture + decorative details ----
-    // Dense procedural speckle: many deterministic 1px dots scattered inside the
-    // diamond, in the material's flat fleck colours — grass blades, pebbles,
-    // ripples. All flat-coloured dots (no gradients); density carries the detail.
-    if (!emissive) {
-      const flecks = FLECKS[t.mat] || FLECKS.grass;
-      const n = t.mat === "water" ? 12 : 16;   // much denser than before
-      for (let i = 0; i < n; i++) {
-        const r1 = hash2(cell.x * 13 + i * 91 + 3, cell.y * 17 + i * 57 + 5);
-        const r2 = hash2(cell.x * 29 + i * 41 + 7, cell.y * 23 + i * 71 + 9);
-        // uniform point inside the diamond: |u|+|v| <= 1
-        let u = r1 * 2 - 1, v = r2 * 2 - 1;
-        if (Math.abs(u) + Math.abs(v) > 1) { u = Math.sign(u) - u; v = Math.sign(v) - v; }
-        const fx = Math.round(cx + u * hw);
-        const fy = Math.round(cy + v * hh);
-        const col = flecks[Math.floor(hash2(cell.x + i * 3, cell.y + i * 5) * flecks.length)];
-        ctx.fillStyle = col;
-        // slightly larger tufts occasionally for grass — still flat colour
-        const big = t.mat === "grass" && r1 > 0.88;
-        ctx.fillRect(fx, fy, big ? 2 : 1, 1);
-      }
+    // ---- Top face: a 4x4 grid of tiny voxel sub-diamonds ----
+    // Instead of one big flat diamond, draw SUB x SUB little iso sub-diamonds, each
+    // a quiet close shade of the tile's base colour. That fine subdivision is the
+    // detail — it reads as a dense voxel cluster, not one flat Minecraft square.
+    if (emissive) {
+      // Emissive tiles: keep the glow solid but still faceted into sub-cells so the
+      // structure matches; the pulse colour is uniform across the cell.
+      for (let i = 0; i < SUB; i++)
+        for (let j = 0; j < SUB; j++)
+          fillTopSub(cx, cy, hw, hh, i, j, top);
+    } else {
+      for (let i = 0; i < SUB; i++)
+        for (let j = 0; j < SUB; j++)
+          fillTopSub(cx, cy, hw, hh, i, j, subShade(top, cell.x, cell.y, i, j));
     }
 
     // faint glow ring around emissive tiles
